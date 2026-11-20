@@ -1,0 +1,9 @@
+{
+  "name": "celestial-banat",
+  "version": "4.0.0",
+  "private": true,
+  "main": "index.js",
+  "engines": { "node": ">=18" },
+  "scripts": { "start": "node index.js" },
+  "dependencies": { "ws3-fca": "^2.0.1" }
+}
