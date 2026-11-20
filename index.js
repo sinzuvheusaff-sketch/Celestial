@@ -1,10 +1,10 @@
 "use strict";
 
 /*
- * ECLIPSE BANAT — no-key build, extended
+ * CELESTIAL BANAT — no-key build, extended
  * --------------------------------------
  * Optional modules (auto-disabled if env/deps missing):
- *   - Raid Mode        (needs ECLIPSE_RAID_DATABASE_URL or DATABASE_URL + `pg`)
+ *   - Raid Mode        (needs CELESTIAL_RAID_DATABASE_URL or DATABASE_URL + `pg`)
  *   - Group title lock (needs Neon store env + `pg`)   ← kept separate from `!banat lockname`
  *   - Reaction emoji   (always on; configurable via dashboard)
  *   - Spam Mode        (always available while connected)
