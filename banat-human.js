@@ -72,4 +72,16 @@ function sendBanatReplyWithTyping(api, message, threadID, replyToMessageID = nul
             if (err) { console.error("[BANAT] send failed:", err?.message || err); finish(false); return; }
             finish(true);
           }, replyToMessageID || null);
-        } catch (e) { console
+        } catch (e) { console.error("[BANAT] reply error:", e); finish(false); }
+      }, prepared.typingMs);
+    }, delay);
+  });
+}
+
+module.exports = {
+  BANAT_REPLY_DELAY_MS: REPLY_DELAY_MS,
+  BANAT_MAX_HUMAN_DELAY_MS: MAX_DELAY_MS,
+  prepareBanatReply,
+  resolveReplyDelayMs,
+  sendBanatReplyWithTyping
+};
