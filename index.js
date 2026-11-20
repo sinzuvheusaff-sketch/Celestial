@@ -1,11 +1,11 @@
 "use strict";
 
 /*
- * CELESTIAL BANAT — no-key build, extended
+ * ECLIPSE BANAT — no-key build, extended
  * --------------------------------------
  * Optional modules (auto-disabled if env/deps missing):
- *   - Raid Mode        (needs CELESTIAL_RAID_DATABASE_URL or DATABASE_URL + `pg`)
- *   - Group title lock (needs Neon store env + `pg`)   ← kept separate from `!banat lockname`
+ *   - Raid Mode        (needs ECLIPSE_RAID_DATABASE_URL or DATABASE_URL + `pg`)
+ *   - Group title lock (needs Neon store env + `pg`)
  *   - Reaction emoji   (always on; configurable via dashboard)
  *   - Spam Mode        (always available while connected)
  *   - Slash banats     (used by on/off commands — pure strings, no deps)
@@ -200,7 +200,6 @@ function handleBanatCommand(api, event, body) {
   const sub = (parts[1] || "status").toLowerCase();
   const stateChanging = ["on","enable","start","off","disable","stop","toggle"].includes(sub);
   if (stateChanging && !isBotAdmin(event.senderID)) {
-    // Use the slash-banats unauthorized pool here so it's not dead code.
     return sendCommandReply(api, event, slashBanats.pickUnauthorizedSlashBanat(threadID, event.senderID)) && true;
   }
   if (sub === "on" || sub === "enable" || sub === "start") {
@@ -247,7 +246,6 @@ function sendBanat(api, event, text) {
 function onMessage(api, event) {
   if (!event) return;
 
-  // Route Messenger log events to GC + Raid + Title guards first.
   if (event.type === "event") {
     try { gc.handleEvent(api, event, botUserID); } catch (e) { console.warn("[GC]", e?.message || e); }
     if (raidMode?.isInitialized?.()) raidMode.handleEvent(event).catch(e => console.warn("[RAID]", e?.message || e));
@@ -263,9 +261,7 @@ function onMessage(api, event) {
   if (!body) return;
   lastMessageAt = new Date().toISOString();
 
-  // Incoming-message reaction
   const r = botSettings.getReactionSettings();
-  const senderID = String(event.senderID || "");
   if (r.enabled && ["incoming_messages","both"].includes(r.target) && reactionAudience) {
     reactionAudience.isAllowed(r, event, api).then(allowed => {
       if (allowed && botSettings.shouldReact(String(event.threadID), "incoming_messages") && event.messageID) {
@@ -296,7 +292,6 @@ function onMessage(api, event) {
   if (!reply) return;
   sendBanat(api, event, reply)
     .then(sent => {
-      // Bot-reply reaction path
       const rr = botSettings.getReactionSettings();
       if (sent === true && rr.enabled && ["bot_replies","both"].includes(rr.target) && event.messageID && botSettings.shouldReact(threadID, "bot_replies")) {
         try {
@@ -392,13 +387,155 @@ function loginBot(sessionOverride = null) {
   return true;
 }
 
-// ──────────────────────────────────────────────────────────────
-// Optional modules — initialized once, fail soft
-// ──────────────────────────────────────────────────────────────
 raidMode = createRaidMode({ getApi: () => messengerApi, namespace: "eclipse-banat" });
 raidMode.initialize().then(ok => {
   if (ok) { console.log("[RAID] initialized"); if (messengerConnected) raidMode.start(); }
   else console.warn("[RAID] disabled:", raidMode.getStatus().then?.(s => s.error).catch?.(() => "") || "not available");
 }).catch(e => console.warn("[RAID] init failed:", e?.message || e));
 
-titleGuard = createGroupTitleGuard({ store: null, getApi: () => messenger
+titleGuard = createGroupTitleGuard({ store: null, getApi: () => messengerApi });
+try { titleGuard.start(); } catch (e) { console.warn("[TITLE]", e?.message || e); }
+
+reactionAudience = createReactionAudience({
+  ttlMs: 120000,
+  getAdmins: async (api, threadID) => {
+    if (!api?.getThreadInfo) return [];
+    return new Promise(resolve => {
+      try {
+        api.getThreadInfo(String(threadID), (err, info) => {
+          if (err || !info) return resolve([]);
+          const ids = Array.isArray(info.adminIDs) ? info.adminIDs.map(String) : [];
+          resolve(ids);
+        });
+      } catch (_) { resolve([]); }
+    });
+  }
+});
+
+spamMode = createSpamMode({
+  getApi: () => messengerApi,
+  isAuthorized: () => messengerConnected && !botPaused,
+  sendMessage: (api, message, threadID) => new Promise((resolve, reject) => {
+    trafficSendMessage(api, message, threadID, (err, info) => err ? reject(err) : resolve(info));
+  })
+});
+
+try {
+  require("./dashboard-api")(PORT, () => ({
+    ok: true,
+    facebook_connected: messengerConnected,
+    session_active: messengerConnected,
+    bot_running: messengerConnected && !botPaused,
+    login_in_progress: loginInProgress,
+    login_error: loginError,
+    last_connected_at: lastConnectedAt,
+    last_disconnected_at: lastDisconnectedAt,
+    last_listener_error: lastListenerError,
+    last_message_at: lastMessageAt,
+    uptime_seconds: Math.floor(process.uptime()),
+    node_version: process.version,
+    memory: process.memoryUsage(),
+    raid: { available: false }, 
+    updated_at: new Date().toISOString()
+  }), {
+    setPaused: (p) => { botPaused = p; if (p) spamMode.stopAll("paused"); pushEvent("bot", p ? "paused" : "resumed"); },
+    getPaused: () => botPaused,
+    connectSession: async (raw) => {
+      try { fs.writeFileSync(SESSION_FILE, raw, { mode: 0o600 }); } catch (_) {}
+      let payload;
+      try { payload = JSON.parse(raw); } catch (_) { payload = raw; }
+      loginBot(normalizeSession(payload));
+      return { saved: true };
+    },
+    reconnect: async () => {
+      try { messengerApi?.stopListenMqtt?.(); } catch (_) {}
+      messengerConnected = false;
+      activeListenerGeneration = 0;
+      loginBot();
+      pushEvent("session", "Reconnect requested");
+    },
+    disconnect: async () => {
+      try { messengerApi?.stopListenMqtt?.(); } catch (_) {}
+      messengerApi = null;
+      messengerConnected = false;
+      activeListenerGeneration = 0;
+      try { fs.unlinkSync(SESSION_FILE); } catch (_) {}
+      pushEvent("session", "Disconnected");
+    },
+    getSessionStatus: () => {
+      let configured = false;
+      try { configured = fs.existsSync(SESSION_FILE) || Boolean(process.env.FB_COOKIES || process.env.FB_APPSTATE); } catch (_) {}
+      return { configured, connected: messengerConnected };
+    },
+    getEvents: () => activityEvents,
+    getGroups: () => new Promise((resolve, reject) => {
+      if (!messengerApi?.getThreadList) return reject(new Error("Messenger not connected"));
+      messengerApi.getThreadList(50, null, ["INBOX"], (err, list) => {
+        if (err) return reject(err);
+        resolve((list || []).filter(t => t && (t.isGroup !== false)).map(t => ({
+          threadID: String(t.threadID),
+          name: t.name || "Group",
+          participantCount: (t.participantIDs || []).length
+        })));
+      });
+    }),
+    getGroupMembers: (threadID) => new Promise((resolve, reject) => {
+      if (!messengerApi?.getThreadInfo) return reject(new Error("Messenger not connected"));
+      messengerApi.getThreadInfo(String(threadID), (err, info) => {
+        if (err) return reject(err);
+        const ids = Array.isArray(info?.participantIDs) ? info.participantIDs.map(String) : [];
+        const admins = new Set(Array.isArray(info?.adminIDs) ? info.adminIDs.map(String) : []);
+        const names = info?.userInfo || {};
+        resolve(ids.map(id => ({
+          userID: id,
+          name: names[id]?.name || `Member ${id.slice(-4)}`,
+          isAdmin: admins.has(id)
+        })));
+      });
+    }),
+    getSettings: async () => botSettings.getSettings(),
+    updateGroup: async (threadID, input) => botSettings.updateGroup(threadID, input || {}),
+    gcState: () => gc.getState(),
+    gcAction: async (action, body) => {
+      const r = await gc.run(messengerApi, action, body || {});
+      if (r && r.background && typeof r.job === "function") Promise.resolve().then(r.job).catch(e => console.error("[GC]", e));
+      return r;
+    },
+    getReaction: async () => botSettings.getReactionSettings(),
+    updateReaction: async (input) => {
+      const current = botSettings.getReactionSettings();
+      const merged = validateReactionTarget({ ...current, ...(input || {}) });
+      const next = botSettings.setRuntimeReaction(merged);
+      pushEvent("settings", `reaction emoji ${next.emoji} · audience ${next.targetMode}`);
+      return next;
+    },
+    spamMode: {
+      start: async (input) => {
+        const groups = await new Promise((resolve, reject) => {
+          if (!messengerApi?.getThreadList) return reject(new Error("Messenger not connected"));
+          messengerApi.getThreadList(50, null, ["INBOX"], (e, l) => e ? reject(e) : resolve(l || []));
+        });
+        const threadID = String(input?.threadID || "").trim();
+        if (!groups.some(g => String(g.threadID) === threadID)) throw new Error("Choose a group from the loaded list.");
+        return spamMode.start({ threadID, message: String(input.message || "").trim(), intervalSeconds: input.intervalSeconds, loops: input.loops ?? 1 });
+      },
+      stop: (threadID) => spamMode.stop(threadID),
+      stopAll: (reason) => spamMode.stopAll(reason),
+      getStatus: () => spamMode.getStatus()
+    },
+    raidMode: {
+      isInitialized: () => Boolean(raidMode?.isInitialized?.()),
+      getStatus: () => raidMode.getStatus(),
+      getGroups: () => raidMode.getGroups(),
+      saveTheme: (input) => raidMode.saveTheme(input),
+      uploadImage: (buffer, type, name) => raidMode.uploadImage(buffer, type, name),
+      getImage: () => raidMode.getImage(),
+      activate: (input) => raidMode.activate(input),
+      repair: (threadID) => raidMode.repairGroup(String(threadID), "manual-repair"),
+      emergencyStop: () => raidMode.emergencyStop()
+    }
+  });
+} catch (e) { console.error("[DASHBOARD] start failed:", e); }
+
+console.log("[BANAT] booting");
+try { loginBot(); } catch (e) { console.error("[BOOT]", e?.message || e); }
